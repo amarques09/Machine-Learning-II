@@ -1,0 +1,661 @@
+---
+title: 'Second Assignment'
+author: "Angel Castellanos"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+  theme: spacelab
+---
+
+<style type="text/css">
+body{ 
+  margin-left: 0px;
+  line-height: 20px;
+  }
+body .main-container { width: 1600px; max-width:2800px;}
+
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+#TOC {
+  position: fixed;
+  width: 200px;
+  left: 1;
+  top: 0;
+  margin-right: 1px;
+  overflow:auto;
+}
+</style>
+
+```{r Initialization, echo = FALSE, include = FALSE}
+# Modify this value to adapt the width of the HTML to the size of the screen
+options(width = 400)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                      cache = FALSE, tidy = FALSE, size = "small")
+
+knitr::opts_chunk$set(fig.width=10, fig.height=10) 
+
+
+#Imports
+library(ggplot2)
+library(knitr)
+library(dplyr)
+library(plyr)
+library(lubridate)
+library(corrplot)
+library(rpart)
+library(caret)
+library(data.table)
+
+```
+
+# Introduction
+My solution to the Assignment
+
+For this assignment we have used the experimental framework provided by the <b>Pump it Up: Data Mining the Water Table challenge</b> hosted by DrivenData.
+DrivenData is a platform for data challenges where data science can have positive social impact. For more information, please refer to: <a href="https://www.drivendata.org/">https://www.drivendata.org/</a>.
+
+The <b>Pump it Up: Data Mining the Water Table challenge</b> focuses on helping the Tanzanian Ministry of Water with the maintenance of water pumps. In particular, systems participating in the challenge have to predict which water pumps are functional, which need some repairs and which do not work at all among those included in the dataset. <br> 
+To that end, <a href="http://taarifa.org/">Taarifa</a> and the <a href="http://maji.go.tz/">Tanzanian Ministry of Water</a> provide an annotated dataset including information about the water pumps valuable to predict their operating condition.<br>. You can access and download the dataset from: <a href="https://www.drivendata.org/competitions/7/pump-it-up-data-mining-the-water-table/"> https://www.drivendata.org/competitions/7/pump-it-up-data-mining-the-water-table/</a> (In order to download the dataset you should have a DrivenData account to log in or create a new free account). 
+
+# Loading the dataset
+The dataset is provided in three separated files:
+
+* <b>4910797b-ee55-40a7-8668-10efd5c1b960.csv:</b> includes the training set values (i.e., ID of the water pump and the related features)
+* <b>0bf8bc6e-30d0-4c50-956a-603fc693d966.csv:</b> includes the training set labels (i.e., ID of the water pump and the related labels [functional, not functional, functional needs repair])
+* <b>702ddfc5-68cd-4d1d-a0de-f5f566f76d91.csv:</b> includes the test set values (i.e., ID of the water pump and the related features) of the water pumps to predict their status.
+
+As usual, the first step is to load the datasets and visualize their values (with the <a href="https://stat.ethz.ch/R-manual/R-devel/library/base/html/summary.html">summary function</a>) to find possible missing values, mistakes in the data or aspect to focus when cleaning the dataset.
+
+In this dataset, you should pay special attention to the classes of the columns when loading the dataset to avoid future format problems. In the challenge webpage you can find the description of each feature that will help you to identify the type of each feature. In the following code I am using the parameter `colClasses` to set the specific class of each feature. For more information on this parameter, please review the following documentation:
+<a href="https://stat.ethz.ch/R-manual/R-devel/library/utils/html/read.table.html">https://stat.ethz.ch/R-manual/R-devel/library/utils/html/read.table.html</a>
+
+
+```{r Load Dataset}
+# Types of the features
+colClasses = c("integer","numeric","Date","factor","numeric","factor",
+               "numeric","numeric","factor","integer","factor","factor",
+               "factor","factor","factor","factor","factor","numeric",
+               "logical","factor","factor","factor","logical","integer",
+               "factor","factor","factor","factor","factor","factor",
+               "factor","factor","factor","factor","factor","factor",
+               "factor","factor","factor","factor") 
+
+training_set = read.csv("Dataset/Pump it Up/4910797b-ee55-40a7-8668-10efd5c1b960.csv", header = TRUE, sep = ",", colClasses = colClasses)
+training_labels = read.csv("Dataset/Pump it Up/0bf8bc6e-30d0-4c50-956a-603fc693d966.csv", header = TRUE, sep = ",",  colClasses = c("integer","factor"))
+training_set <- merge(training_set,training_labels, by="id")
+
+test_set = read.csv("Dataset/Pump it Up/702ddfc5-68cd-4d1d-a0de-f5f566f76d91.csv", header = TRUE, sep = ",", colClasses = colClasses)
+
+summary(training_set)
+summary(test_set)
+```
+
+To avoid repeating the Feature Engineering process (once for training and once for test), I join both datasets.
+
+```{r Joinning datasets}
+test_set$status_group <- factor(0)
+dataset <- rbind(training_set, test_set)
+```
+
+# Dataset Cleaning
+
+Some problems can be detected by visualizing the dataset, this step focuses on cleaning the data to facilitate their later exploration and the feature engineering process.
+In particular, I will correct some values in the features that do not make sense (e.g., Is it possible to have a GPS longitude 0.0 in Tanzania?), imputing missing values and removing those columns that does not provide insightful information (e.g., Is `num_private` important for the pump status?).
+
+First of all, check whether we have columns in the dataset with NA values
+```{r Before Check}
+sapply(dataset, function(x) sum(is.na(x)))
+```
+
+Only `permit` and `public_meeting` have `NAs`. As they are logical features (TRUE or FALSE), we are going to transform them into a factor and replace the NA values by unknown
+
+```{r Logical Features Imputation}
+dataset$permit<- as.character(dataset$permit)
+dataset$permit[is.na(dataset$permit)]<-"unknown"
+dataset$permit<-as.factor(dataset$permit)
+
+dataset$public_meeting<- as.character(dataset$public_meeting)
+dataset$public_meeting[is.na(dataset$public_meeting)]<-"unknown"
+dataset$public_meeting<-as.factor(dataset$public_meeting)
+```
+
+Check that the NA values have been replaced
+```{r NAs After Check}
+sapply(dataset, function(x) sum(is.na(x)))
+```
+Perfect! no null values in the dataset.
+
+Many waterpoints have a `gps_height` equal to 0 (around 1/3 of the dataset). It seems that they are missing values that we have to impute. Since the height of the gps point is related to its location (latitude and longitude), I will impute them by fitting a decision tree on these features to predict a missing height based on the height of the closest points (Idea taken from: https://marcocarnini.github.io/software/2016/10/10/pump-it-up-imputing_gps_height.html).
+
+```{r Height Imputation}
+heightFit <- rpart(gps_height ~ latitude + longitude, data=dataset[(dataset$gps_height!=0),], method="anova")
+dataset$gps_height[is.na(dataset$gps_height)] <- predict(heightFit, dataset[is.na(dataset$gps_height),])
+
+```
+
+`construction_year` includes values equal to 0 when it shouldn't.
+It appears that missing values or erroneous measurements have been corrected by setting 0 as value. Consequently, I will mutate these 0 values to 'NA', avoiding in this way their influence in later calculations.
+
+```{r Mutate 0 values}
+dataset <- mutate(dataset, construction_year = ifelse(construction_year == 0, NA, construction_year))
+```
+
+
+`population` has also many 0 values that appear to be missing values too. To impute them, I will follow a simple approach by using the mean of the population.
+
+```{r Population Imputation}
+dataset$population[dataset$population==0]<- round(mean(dataset$population[dataset$population!=0]),digits = 0)
+
+```
+
+
+In the same way, `latitude` ranges are in [-11.65,-2e-08] and `longitude` ranges in [0.0,40.35]. The scatter plot suggests that 0s indicate the coordinates are missing values or errors. 
+
+```{r Visualize Before GPS coordinates}
+ggplot(dataset, aes(x = longitude, y = latitude)) + geom_point(shape = 1)
+```
+
+We can remove these points or leave them as they are. However, there are some proxy features that can give us information about the location of these "missing" pumps. For instance, pumps in the same region should have a similar latitude and longitude, right? (I actually had this idea from reading some other notebooks). So, to impute the "missing" pumps, I will use the mean of the `latitude` and `longitude` of the other waterpoints in the same region.
+
+```{r Mutate GPS coordinates}
+
+# Create the mean longitude per region.
+longsummary <- aggregate( # Aggregate Function
+  longitude~region, # Longitude by Region
+  data=dataset[(dataset$longitude!=0),], # Take only those with longitude > 0 to compute the mean 
+  FUN=mean # Function to apply: i.e., the mean of the aggregation.
+)
+longsummary$region <- as.character(longsummary$region)
+
+# Go over the rows in the dataset
+for(i in 1:nrow(dataset)){
+  row <- dataset[i,]
+  if(row$longitude < 10){ # If longitude is lower than 10
+    new_longitude <- longsummary[longsummary$region == row$region,]$longitude # Select the mean longitude for the region of the current row
+    dataset[i,]$longitude <- new_longitude # Substitute the old longitude with the new one
+  }
+}
+
+
+latsummary <- aggregate(latitude~region,data=dataset[(dataset$latitude!=0),], FUN=mean)
+latsummary$region <- as.character(latsummary$region)
+for(i in 1:nrow(dataset)){
+  row <- dataset[i,]
+  if(row$latitude > -1e-06){
+    new_latitude <- latsummary[latsummary$region == row$region,]$latitude
+    dataset[i,]$latitude <- new_latitude
+  }
+  
+}
+
+```
+
+Let's visualize if we have corrected the location errors
+
+```{r Visualize AfterGPS coordinates}
+
+ggplot(dataset, aes(x = longitude, y = latitude)) + geom_point(shape = 1)
+
+```
+
+Now we have all the pumps located at Tanzania.
+
+`amount_tsh` has 70% of missing values. In this situation it does not make much sense the imputation of the feature. Any value that we can come up with is going to be misleading. In the end, we are trying to generalize a value for 70% of the data from the other 30%. We simply do not have enough data. The most sensible thing is to remove this feature.
+
+```{r amount_tsh removal}
+dataset <- dataset[, -which(names(dataset) == "amount_tsh")]
+```
+
+There are some other values that do not look relevant for the prediction:
+ - `num_private`
+ - `wpt_name` refers to the name of the water point, which seems irrelevant to the prediction of its status
+ - `scheme_name` includes the name of the waterpoint operator. `scheme_management` includes the same information but grouped by type, which seems more relevant to predict the status.
+ 
+Therefore, I remove these three features:
+
+```{r Remove other features }
+dataset <- dataset[, -which(names(dataset) == "num_private")]
+dataset <- dataset[, -which(names(dataset) == "wpt_name")]
+dataset <- dataset[, -which(names(dataset) == "scheme_name")]
+
+```
+
+There are some other features that look like proxies (i.e., a variable that it is not in relevant itself, but that serves in place of an unobservable or immeasurable variable) of features included in the dataset. For instance, `region_code`, `district_code`, `ward`, `subvillage` and `lga` are proxies of `region`. Hence, just by keeping the `region` feature we will have the same information.
+```{r Remove region proxies}
+#region_code - remove
+dataset <- dataset[, -which(names(dataset) == "region_code")]
+dataset <- dataset[, -which(names(dataset) == "district_code")]
+dataset <- dataset[, -which(names(dataset) == "ward")]
+dataset <- dataset[, -which(names(dataset) == "subvillage")]
+dataset <- dataset[, -which(names(dataset) == "lga")]
+```
+
+The feature `recorded_by` does not carry any information: it has a unique value (GeoData Consultants). 
+```{r Remove recorded_by}
+dataset <- dataset[, -which(names(dataset) == "recorded_by")]
+```
+
+The feature `scheme_management` has a level `None` that is not present in the test_set. Therefore, we change the value to ""
+```{r Clean scheme_management}
+dataset$scheme_management[dataset$scheme_management=="None"] <- ""
+dataset$scheme_management <- factor(as.character(dataset$scheme_management))
+```
+
+In the same way, the feature `extraction_type` has a level `other - mkulima/shinyanga` that is not present in the test_set. I will change the value to `other`
+
+```{r Clean extraction_type}
+dataset$extraction_type[dataset$extraction_type=="other - mkulima/shinyanga"] <- "other"
+dataset$extraction_type <- factor(as.character(dataset$extraction_type))
+```
+
+Let's visualize the cleaned dataset
+```{r}
+summary(dataset)
+```
+
+## Saving cleaned dataset
+Write the cleaned dataset (before the feature engineering process) for its later use
+```{r}
+# Save the cleaned dataset
+write.csv(dataset, file="Dataset/Pump it Up/cleaned_dataset.csv", row.names=FALSE)
+```
+
+```{r}
+# If we need to load the previously cleaned dataset
+colClasses = c("character","Date","factor","numeric","factor",
+               "numeric","numeric","factor","factor","integer","factor","factor",
+               "factor","factor","factor","factor",
+               "factor","factor","factor","factor","factor","factor",
+               "factor","factor","factor","factor","factor","factor",
+               "factor","factor")
+
+dataset = read.csv("Dataset/Pump it Up/cleaned_dataset.csv", header = TRUE, sep = ",", colClasses = colClasses)
+
+```
+
+# Feature Engineering
+Based on the previous inspection of the dataset, I will engineer some features to increase the performance of the pump status classification.
+
+Firstly, we have to deal with the format of the dates. As offered in the dataset they are not very useful. Nevertheless, it offers two interesting aspects about the water pump: **how old the measurement is (the older, the less valuable)** and in **which month it has been recorded (some months might present a more challenging scenario for the pumps: intensive use during summer, cold in winter)**. 
+
+I have transformed the `date_recorded` column into 3 different features:
+ - Number of days until Jan 1 2014
+ - month recorded as factor
+ - day of the year recorded as numeric
+
+```{r Transform date_recorded}
+
+date_recorded_offset_days <- as.numeric(as.Date("2014-01-01", format="%Y-%m-%d") - as.Date(dataset$date_recorded, format="%d/%m/%y"))
+date_recorded_month <- lubridate::month(dataset$date_recorded)
+day_of_year <- as.numeric(yday(dataset$date_recorded))
+dataset <- dataset[, -which(names(dataset) == "date_recorded")]
+dataset <- cbind(dataset, date_recorded_offset_days)
+dataset <- cbind(dataset, date_recorded_month)
+dataset <- cbind(dataset, day_of_year)
+
+```
+
+There are some features that are subclasses of other features (e.g., `extraction_type_class`, `extraction_type_group` and `extraction_type` ). Let's inspect their values to decide whether makes sense to keep them unmodified, to combine them, or to only select some of them.
+
+```{r Group by extraction}
+tally(group_by(dataset, extraction_type_class, extraction_type_group, extraction_type))
+```
+
+The middle level, `extraction_type_group`, does not provide much more information than the other two levels. Therefore, I will remove it. I will also combine some of the smaller levels which does not provide useful information (e.g., india mark ii vs. india mark iii).
+
+```{r extraction_type_group cleaning}
+dataset <- mutate(dataset, extraction_type = revalue(extraction_type, 
+                                                               c("cemo" = "other motorpump",
+                            	                                   "climax" = "other motorpump",
+                            	                                   "other - play pump" = "other handpump",
+                            	                                   "walimi" = "other handpump",
+                            	                                   "other - swn 81" = "swn",
+                            	                                   "swn 80" = "swn",
+                            	                                   "india mark ii" = "india mark",
+                            	                                   "india mark iii" = "india mark")))
+
+dataset <- dataset[, -which(names(dataset) == "extraction_type_group")]
+```
+
+In a similar way, `source`, `source_type` and `source_class` provide hierarchical information of the same aspect. We remove the middle level `source_type`.
+```{r source cleaning}
+tally(group_by(dataset, source, source_type, source_class))
+
+
+dataset <- dataset[, -which(names(dataset) == "source_type")]
+```
+
+Inspecting the `payment` and `payment_type` features, we can see that they share the same information (although some categories have been renamed). I keep `payment_type`
+
+```{r payment cleaning}
+tally(group_by(dataset, payment_type, payment))
+
+dataset <- dataset[, -which(names(dataset) == "payment")]
+
+```
+
+The `quality_group` and the `water_quality` features have similar information. We keep the more specific `water_quality`
+```{r quality cleaning}
+tally(group_by(dataset, quality_group, water_quality))
+
+dataset <- dataset[, -which(names(dataset) == "quality_group")]
+```
+
+Similarly, we keep the feature `waterpoint_type`, more precise than `waterpoint_type_group`
+```{r waterpoint_type cleaning}
+tally(group_by(dataset, waterpoint_type_group, waterpoint_type))
+
+dataset <- dataset[, -which(names(dataset) == "waterpoint_type_group")]
+```
+
+
+Given that the features `quantity` y `quantity_group` have exactly the same information, we only keep `quantity`
+```{r quantity cleaning}
+tally(group_by(dataset, quantity, quantity_group))
+
+dataset <- dataset[, -which(names(dataset) == "quantity_group")]
+```
+
+From <a href="https://www.expertafrica.com/tanzania/info/tanzania-weather-and-climate">Expert Africa</a>: <i>Tanzania has two rainy seasons: The short rains from late-October to late-December, a.k.a. the Mango Rains, and the long rains from March to May</i>. Therefore, we are going to create this `season` variable.
+
+```{r Create saeson variable}
+dataset <- mutate(dataset, season = factor( ifelse( date_recorded_month <= 2, "dry short",
+                                                              ifelse( date_recorded_month <= 5, "wet long",
+                                                                      ifelse(date_recorded_month <= 9, "dry long", "wet short")))))
+
+summary(dataset)
+```
+
+
+The feature `construction_year` appears to be one of the most important ones: the older the pump, the more probable its failure. 
+In order to increase the predictive power of the feature, I have converted it to a factor and reduce the factor levels to 20.  
+
+```{r Reduce construction_year levels}
+NUM_LEVELS_CONSTRUCTION_YEAR = 20 
+dataset$construction_year <- factor(paste0("y",as.character(dataset$construction_year)))
+cyears <- names(summary(dataset$construction_year)[order(-summary(dataset$construction_year))][1:NUM_LEVELS_CONSTRUCTION_YEAR])
+cy <- factor(dataset$construction_year, levels=c(cyears, "Other"))
+cy[is.na(cy)] <- "Other"
+dataset$construction_year <- cy
+
+```
+
+The organization funding the pumps might have a great impact in their performance as well. Local authorities, closer to the communities, are expected to have better knowledge of the specific logistics and the actual need from the people. Consequently, the pumps funded by these local authorities should perform better.
+In this sense, we are going to create a new feature `funder_cat` that groups the funder in 5 categories (local_community, Tanzania_Gov, foreign_gov, UN_agencies and others).
+(Forked from:  https://nycdatascience.com/blog/student-works/linlin_cheng_proj_5/)
+```{r Generate new feature funder_cat}
+# Generate a new variable to categorize funders:
+fun<-as.character(dataset$funder)
+
+f_gov<-c('danida', 'A/co germany', 'belgian', 'british', 'england', 'german', 'germany',
+         'china', 'egypt', 'European Union', 'finland', 'japan', 'france', 'greec',
+         'netherlands', 'holland', 'holand', 'nethe', 'nethalan', 'netherla', 'netherlands',
+         'iran', 'irish', 'islam','italy', 'U.S.A', 'usa', 'usaid', 'swiss', 'swedish','korea', 'niger'
+)
+NGO<-c('World Bank', 'Ngo', "Ngos", "Un","Un Habitat", "Un/wfp", "Undp", "Undp/aict", "Undp/ilo", "Unesco",                        
+       "Unhcr", "Unhcr/government", "Unice", "Unice/ Cspd", "Unicef", "Unicef/ Csp", "Unicef/african Muslim Agency", 
+       "Unicef/central", "Unicef/cspd", "Uniceg", "Unicet", "Unicrf", "Uniseg", "Unp/aict", "wwf", "wfp")
+local_commu <- unique(c(agrep('commu', dataset$funder, value=TRUE), 
+                        agrep('vill', dataset$funder, value=TRUE)))
+tanz_gov<- unique(c(agrep('Government of Tanzania', dataset$funder, value=TRUE),
+                    agrep('wsdp', dataset$funder, value=TRUE)))               
+
+unique(fun[agrep('wsdp', fun)])
+
+dataset$funder = as.character(dataset$funder)
+
+temp = dataset$funder
+
+for (i in 1:length(NGO)){
+  temp = replace(temp, 
+                 agrep(NGO[i], temp),
+                 'UN_agencies')
+}
+
+for (i in 1:length(f_gov)){
+  temp = replace(temp, 
+                 agrep(f_gov[i], temp),
+                 'foreign_gov')
+}
+
+for (i in 1:length(local_commu)){
+  temp = replace(temp, 
+                 agrep(local_commu[i], temp), 
+                 "local_community")
+}
+
+
+for (i in 1:length(tanz_gov)){
+  temp = replace(temp, 
+                 agrep(tanz_gov[i], temp), 
+                 "Tanzania_Gov")
+}
+
+
+temp = replace(temp, 
+               temp != "UN_agencies" & temp != 'foreign_gov' & temp != 'local_community' & temp != 'Tanzania_Gov',
+               'other')
+
+dataset$funder_cat<-factor(temp)
+dataset$funder = factor(dataset$funder)
+
+```
+
+
+Inspecting the funder column in more detail, it has hundreds, even thousands, of values. However, many of the funders have very few pumps associated.
+
+```{r Inspect funder histogram}
+#Number of factors in the original funder data
+#Histogram of the original funder data
+tb <- table(dataset$funder)
+funderfac <- factor(dataset$funder, levels = names(tb[order(tb, decreasing = TRUE)]))
+qplot(funderfac) + theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+
+```
+
+In order to focus on the more important founders (those with more pumps associated), I am going to take only the 10 most important and leave the rest as "Others" 
+```{r Reduce funder levels}
+#Funder - reduce factor levels
+NUM_LEVELS_FUNDER = 10
+
+funderNames <- names(summary(dataset$funder)[1:NUM_LEVELS_FUNDER])
+funder <- factor(dataset$funder, levels=c(funderNames, "Other"))
+funder[is.na(funder)] <- "Other"
+dataset$funder <- funder
+
+```
+
+
+Same logic is applied to the Installer column: take only the most 10 important features and leave the rest as "Others"
+```{r Reduce installer levels}
+#Installer - reduce factor levels
+NUM_LEVELS_INSTALLER = 10
+installerNames <- names(summary(dataset$installer)[1:NUM_LEVELS_INSTALLER])
+installer <- factor(dataset$installer, levels=c(installerNames, "Other"))
+installer[is.na(installer)] <- "Other"
+dataset$installer <- installer
+
+```
+
+
+## Saving the feature engineered dataset
+
+```{r Final version}
+summary(dataset)
+
+write.csv(dataset, file="Dataset/Pump it Up/processed_dataset.csv", row.names=FALSE)
+
+```
+
+Load the previously processed dataset (if needed)
+```{r Load engineered dataset}
+processedColClasses = c("character","factor","numeric","factor","numeric","numeric",
+               "factor","factor","numeric",
+               "factor","factor","factor","factor","factor",
+               "factor","factor","factor","factor","factor","factor",
+               "factor","factor","factor","numeric","numeric","numeric",
+               "factor","factor")
+
+dataset = read.csv("Dataset/Pump it Up/dataset.csv", header = TRUE, sep = ",",  colClasses = processedColClasses)
+```
+
+# Feature Selection
+
+Since we are going to be using mainly Decision Trees, we can "safely" skip this step. The models themselves are going to perform this selection by using the most informative features in order to create the final classifier. 
+
+# Model Selection
+Once processed the dataset, we are going to try different machine learning models.
+
+Firstly, I will define the caret training configuration that I will apply for the training of the models: a 5-fold cross validation. In addition, for the sake of simplicity, I have defined a random search for the parameter optimization: caret will look for the optimal parameter values (e.g., `mtry` in random forest) in a random way. It does not guaranty the finding of the optimal configuration, but it is way faster. If you are interested in the optimal model, change the search methodology from random to grid. I have also defined the `verboseIter` parameter to TRUE, so caret is going to give us a verbose output of the training process.
+
+```{r Train control}
+train_control<- trainControl(method="cv", number=5,  search="random", verboseIter = TRUE)
+```
+
+I split the dataset that I merged for the feature engineering into the original training and test.
+
+```{r Train test split I}
+training_set <- dataset[1:59400,]
+test_set <- dataset[59401:74250,]
+
+```
+
+## Trees
+Trees are a powerful methodology for both classification and regression. They are especially well-suited for this data, where we expect that some subset of features to be especially representative for the target variable.
+I start with a basic tree model to set a performance baseline.
+
+```{r Single Decision Tree}
+cv.rpart<- train(as.factor(status_group)~., data=data.matrix(training_set),
+                 trControl=train_control,
+                 method="rpart", # rpart algorithm
+                 metric="Accuracy", # We tell the model to try to optimize accuracy
+                 tuneGrid= expand.grid(.cp=c(0.0001, 0.00001, 0.000001))) # Try different complexity values
+```
+
+The caret result object includes a variable `results` that includes the cross-validated accuracy for each parameter configuration.
+
+```{r Single Decision Tree Results}
+cv.rpart$results
+```
+
+Cross-validated error is around 76-78%. Not bad for a basic decision tree.
+
+Let's check if more advanced methodologies are able to improve these results. 
+The first one that I am goint to apply is **bagging**. As explained in the theoretical session, bagging allows to grow many trees to then average their results- In this way, we create a more robust model, less prone to overfitting. In particular, I will train a random forest model.
+
+*Note: It is going to take a while! Take a look to this <https://stackoverflow.com/a/32907922> and this link <https://github.com/topepo/caret/issues/108> for more information in caret slowness. You can also try "ranger" (a faster random forest library) instead of "rf" for faster computation.
+
+```{r Random Forest}
+cv.rf<- train(as.factor(status_group)~., data=data.matrix(training_set),
+                 trControl=train_control,
+                 method="rf", # Random Forest
+                 metric="Accuracy",
+                 tuneGrid= expand.grid(.mtry=c(2,5,8,15,25)), # Number of features to be used for the random forest model
+                 verbose=TRUE)
+```
+
+Cross-validated accuracy
+
+```{r Random Forest Results}
+cv.rf$results
+```
+
+Random Forest improves our performance to more than 80%.
+
+If we analyze the `mtry` parameter (the number of features we allow the random forest algorithm to select), we confirm what we saw in class and in the practical session: more is not always better. By allowing random forest to select just a few features, we create a model that generalizes better to unseen data. 
+In more detail, as we explained in class, the best results are achieved by a `mtry` value around sqrt(number of features).
+
+Let's now check if boosting can improve even more these results. To that end, I will apply `xgboost` to train a classification model. (Grab a coffee because this is going to be slow).
+
+```{r XGBoost}
+tuneGridXGB <- expand.grid(
+    nrounds=c(150),
+    max_depth = 25,
+    eta = 0.05,
+    gamma = c(0.1, 1),
+    colsample_bytree = c(0.5,0.75),
+    subsample = c(0.50, 0.75),
+    min_child_weight = c(2,5))
+
+# train the xgboost learner
+cv.xgboost <- train(as.factor(status_group)~., data=data.matrix(training_set),
+    method = 'xgbTree',
+    metric = 'Accuracy',
+    trControl = train_control,
+    tuneGrid = tuneGridXGB)
+```
+
+Cross-validated results
+
+```{r XGBoost results}
+cv.xgboost$results
+```
+
+Little improvement in accuracy from 81% to 81.5%. To create the final submission I will use both and see which one performs better for the test set.
+
+## KNN
+
+I have finally tried KNN. Similar pumps are expected to have similar condition. At least, this is the assumption in which I rely to trust KNN.
+
+```{r KNN}
+cv.knn <- train(as.factor(status_group)~., data=data.matrix(training_set),
+                method = "knn",
+                trControl = train_control,
+                preProcess = c("center","scale"),
+                tuneLength = 20,
+                tuneGrid= expand.grid(.k=c(2,5,10,25)))
+
+```
+
+```{r KKN results}
+cv.knn$results
+
+```
+
+KNN is not able to reach the performance of the trees. KNN is really helpful when there is not a clear decision boundary between our classes. However, if the classes can be separated according to some more or less complex decision boundary, trees are going to be able to find such function and, consequently, outperform simpler approaches like KNN.
+
+# Write Submission
+
+I have created two final predictions with the best models (Random Forest and XGBoost) and uploaded them to the platform.
+They have more or less the same performance:
+ - RF: 0.8205
+ - XGboost: 0.8208
+ 
+```{r Random Forest Submission}
+submission_set = read.csv("Dataset/Pump it Up/SubmissionFormat.csv", header = TRUE, sep = ",")
+
+pred <- predict(cv.rf, data.matrix(test_set))
+submission <- data.frame(id = submission_set$id, y = pred)
+
+submission$status_group[submission$y == 1] <- "functional"
+submission$status_group[submission$y == 2] <- "functional needs repair"
+submission$status_group[submission$y == 3] <- "non functional"
+
+
+write.csv(submission[, which(names(submission) %in% c("id", "status_group"))], file = "Dataset/Pump it Up/rf-results.csv", row.names=FALSE, quote = FALSE)
+```
+
+
+```{r}
+pred <- predict(cv.xgboost, data.matrix(test_set))
+submission <- data.frame(id = submission_set$id, y = pred)
+
+submission$status_group[submission$y == 1] <- "functional"
+submission$status_group[submission$y == 2] <- "functional needs repair"
+submission$status_group[submission$y == 3] <- "non functional"
+
+
+write.csv(submission[ , which(names(submission) %in% c("id", "status_group"))], file = "Dataset/Pump it Up/xgb-results.csv", row.names=FALSE, quote = FALSE)
+```
+
+
+
